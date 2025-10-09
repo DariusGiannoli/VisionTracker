@@ -3,7 +3,7 @@
 ## 0) Prereqs
 
 * **visionOS**: Xcode 16+, visionOS SDK, Apple Vision Pro or Simulator (hand tracking requires device).
-* **Python**: 3.9+, `pip`, LeRobot installed with SO-101 support (Feetech).
+* **Python**: 3.10, `pip`, LeRobot installed with SO-101 support (Feetech).
 
 ## 1) Python side (teleop + control)
 
@@ -35,15 +35,6 @@ lerobot-teleoperate \
 > If your environment uses a different entrypoint, just ensure your pipeline pulls **teleop `vpro`** as the action source. The plugin exposes actions `{ee.x,ee.y,ee.z,ee.wx,ee.wy,ee.wz,gripper_pos}`.
 
 ## 2) visionOS app
-
-1. Open **Xcode** → “Create a new App (visionOS)” named **LeRobotVP**.
-2. Add the Swift files from `visionos-app/` into the project.
-3. In your **Info.plist**, add:
-
-   * `NSHandsTrackingUsageDescription` = “We use hand tracking to control the robot arm.”
-4. Build & run on your Vision Pro device.
-
-**Connect flow:**
 
 * In the **Control** window (visionOS), enter your PC’s IP (or pick from the Bonjour list).
 * Tap **Connect**, then **Start** in the immersive UI to begin streaming.
