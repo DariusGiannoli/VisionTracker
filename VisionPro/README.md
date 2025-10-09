@@ -1,5 +1,3 @@
-Awesome — here’s a complete, clean starter project: a **visionOS app** that streams hand-pose + pinch to your PC, plus a **Python plugin & control server** that plugs into LeRobot (BYOH teleop) and applies config/sync in real time.
-
 ---
 
 # Repository layout
