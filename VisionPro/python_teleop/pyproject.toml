@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_teleoperator_vpro"
+version = "0.1.0"
+description = "Vision Pro teleoperation plugin for LeRobot (pose+pinch over UDP)"
+authors = [{ name = "Gabriel Taieb, Darius Giannoli" }]
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.24"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lerobot_teleoperator_vpro*"]
