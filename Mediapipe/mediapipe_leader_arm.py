@@ -1,378 +1,505 @@
 #!/usr/bin/env python3
 """
-Leader arm via MediaPipe -> 6-DoF targets for LeRobot S0101, with live PREVIEW.
-
-Robust fist detection (CLOSE) using MediaPipe Hands 3D:
-- OPEN  if (fingers_extended >= open_min_fingers) OR (avg_tip_palm_ratio >= open_ratio_thresh)
-- CLOSE if (fingers_extended <= 1) AND (avg_tip_palm_ratio <= fist_ratio_thresh)
-- else keep previous state (hysteresis)
-
-Keys:
-  c = capture current pose as zero-offset for angles
-  z = clear offsets
-  space = toggle sending on/off
-  q = quit
+SAFE MediaPipe-based teleoperation for SO-101 robot
+Maps human arm movements to 6-motor robot control with LIMITED RANGES
 """
 
-import argparse, json, math, socket, time
-from dataclasses import dataclass
-from typing import Dict, Tuple, Optional, List
-import cv2, numpy as np, mediapipe as mp
+import cv2
+import mediapipe as mp
+import numpy as np
+import time
+from lerobot.motors.feetech import FeetechMotorsBus
+from lerobot.motors import Motor, MotorNormMode
+import json
+from pathlib import Path
 
-# ---------- small math helpers ----------
-def _norm(v):
-    n = np.linalg.norm(v);  return v if n < 1e-8 else v / n
+# ==================== SAFETY CONFIGURATION ====================
+PORT = "/dev/tty.usbmodem58FD0170541"
+ROBOT_ID = "dabrius"
+CAMERA_ID = 0  # Change if using external webcam
 
-def angle_between(v1, v2) -> float:
-    n1, n2 = _norm(v1), _norm(v2)
-    dot = float(np.clip(np.dot(n1, n2), -1.0, 1.0))
-    return math.degrees(math.acos(dot))
+# Update rate (Hz) - lower = less power consumption
+UPDATE_RATE = 10  # 10 Hz instead of max speed
+UPDATE_INTERVAL = 1.0 / UPDATE_RATE
 
-def signed_angle_around_axis(u, v, axis) -> float:
-    a = _norm(axis)
-    u_perp = u - np.dot(u, a) * a
-    v_perp = v - np.dot(v, a) * a
-    u_perp, v_perp = _norm(u_perp), _norm(v_perp)
-    unsigned = angle_between(u_perp, v_perp)
-    s = np.dot(a, np.cross(u_perp, v_perp))
-    return unsigned if s >= 0 else -unsigned
-
-def clamp(x, lo, hi): return max(lo, min(hi, x))
-
-def angle_at_3d(a, b, c) -> float:
-    ba, bc = a - b, c - b
-    nba, nbc = _norm(ba), _norm(bc)
-    cosang = float(np.clip(np.dot(nba, nbc), -1.0, 1.0))
-    return math.degrees(math.acos(cosang))
-
-# ---------- filters & config ----------
-class EMA:
-    def __init__(self, alpha=0.2, init=None): self.alpha, self.x = float(alpha), init
-    def update(self, v):
-        self.x = float(v) if self.x is None else self.alpha * float(v) + (1 - self.alpha) * self.x
-        return self.x
-
-@dataclass
-class JointLimits: lo: float; hi: float; invert: bool=False
-@dataclass
-class Offsets:
-    base: float=0.0; shoulder: float=0.0; elbow: float=0.0
-    wrist_flex: float=0.0; wrist_roll: float=0.0; gripper: float=0.0
-
-DEFAULT_LIMITS = {
-    "base":       JointLimits(-90,  90, False),
-    "shoulder":   JointLimits(  0, 130, True ),
-    "elbow":      JointLimits(  0, 150, False),
-    "wrist_flex": JointLimits(-90,  90, True ),
-    "wrist_roll": JointLimits(-90,  90, False),
-    "gripper":    JointLimits(  0, 100, False),
+# ⚠️ SAFETY LIMITS: Adjust these based on your robot's safe range
+# Start SMALL and increase gradually after testing!
+SAFE_LIMITS = {
+    "shoulder_pan": {"min": -40, "max": 40},    # Limited horizontal rotation
+    "shoulder_lift": {"min": -30, "max": 50},   # Limited vertical movement
+    "elbow_flex": {"min": -45, "max": 45},      # Limited elbow bend
+    "wrist_flex": {"min": -35, "max": 35},      # Limited wrist pitch
+    "wrist_roll": {"min": -40, "max": 40},      # Limited wrist rotation
+    "gripper": {"min": -100, "max": 100}        # Full range for gripper (safe)
 }
 
-MOTOR_MAP: List[Tuple[int, str, str]] = [
-    (1, "Base / Shoulder Pan", "base"),
-    (2, "Shoulder Lift",       "shoulder"),
-    (3, "Elbow Flex",          "elbow"),
-    (4, "Wrist Flex",          "wrist_flex"),
-    (5, "Wrist Roll",          "wrist_roll"),
-    (6, "Gripper",             "gripper"),
-]
+# Dead zone: movements smaller than this are ignored (prevents jitter)
+DEAD_ZONE = 3.0  # degrees
+PAUSE_THRESHOLD = 15.0  # If arm drops below this angle, pause mode
 
-# ---------- IO backends ----------
-class BackendBase:  # pragma: no cover
-    def send(self, payload: Dict): ...
-    def close(self): ...
-class PrintBackend(BackendBase):
-    def send(self, payload: Dict): print(json.dumps(payload, separators=(',', ':')))
-class UDPBackend(BackendBase):
-    def __init__(self, host: str, port: int):
-        self.addr = (host, port); self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    def send(self, payload: Dict): self.sock.sendto(json.dumps(payload).encode('utf-8'), self.addr)
-    def close(self): 
-        try: self.sock.close()
-        except Exception: pass
+# Smoothing factor (0 = no smoothing, 0.9 = very smooth but laggy)
+SMOOTHING = 0.8  # Higher = safer, slower movements
 
-# ---------- MediaPipe setup ----------
-POSE, HANDS = mp.solutions.pose.Pose, mp.solutions.hands.Hands
-PL = mp.solutions.pose.PoseLandmark
-RIGHT = {"SHOULDER":PL.RIGHT_SHOULDER,"ELBOW":PL.RIGHT_ELBOW,"WRIST":PL.RIGHT_WRIST,"INDEX":PL.RIGHT_INDEX,"PINKY":PL.RIGHT_PINKY,"THUMB":PL.RIGHT_THUMB}
-LEFT  = {"SHOULDER":PL.LEFT_SHOULDER, "ELBOW":PL.LEFT_ELBOW, "WRIST":PL.LEFT_WRIST, "INDEX":PL.LEFT_INDEX, "PINKY":PL.LEFT_PINKY, "THUMB":PL.LEFT_THUMB}
+# Emergency stop: press 'SPACE' to freeze robot
+EMERGENCY_STOP = False
 
-# ---------- Pose angles ----------
-def vec_of(world_lms, lid) -> np.ndarray:
-    lm = world_lms.landmark[lid]
-    return np.array([lm.x, lm.y, lm.z], dtype=np.float32)
+# Motor hardware configuration (from calibration)
+MOTOR_CONFIG = {
+    "shoulder_pan": {"id": 1, "model": "sts3215", "min": 679, "max": 3411},
+    "shoulder_lift": {"id": 2, "model": "sts3215", "min": 519, "max": 3042},
+    "elbow_flex": {"id": 3, "model": "sts3215", "min": 969, "max": 3196},
+    "wrist_flex": {"id": 4, "model": "sts3215", "min": 816, "max": 3168},
+    "wrist_roll": {"id": 5, "model": "sts3215", "min": 552, "max": 3795},
+    "gripper": {"id": 6, "model": "sts3215", "min": 1999, "max": 3443}
+}
 
-def extract_arm_angles(world_lms, side: str) -> Optional[Dict[str, float]]:
-    ids = RIGHT if side == "right" else LEFT
-    S, E, W = vec_of(world_lms, ids["SHOULDER"]), vec_of(world_lms, ids["ELBOW"]), vec_of(world_lms, ids["WRIST"])
-    I, P    = vec_of(world_lms, ids["INDEX"]), vec_of(world_lms, ids["PINKY"])
-    u, f    = E - S, W - E
-    hand_x  = I - P
-    palm_n  = np.cross(hand_x, (I + P)/2 - W)
-    a       = _norm(f)
-    yaw     = math.degrees(math.atan2(u[0], -u[2]))                   # base pan
-    pitch   = math.degrees(math.atan2(u[1], math.hypot(u[0], u[2])))  # shoulder lift
-    elbow   = angle_between(-u, f)                                     # elbow flex
-    finger_dir = _norm(((I - W) + (P - W)) * 0.5)
-    wrist_flex = signed_angle_around_axis(a, finger_dir, axis=np.cross(a, [0,1,0]) + 1e-8)
-    wrist_roll = signed_angle_around_axis(np.array([0,-1,0],np.float32), _norm(palm_n), axis=a)
-    return {"base":yaw, "shoulder":pitch, "elbow":elbow, "wrist_flex":wrist_flex, "wrist_roll":wrist_roll}
+# ==================== HELPER FUNCTIONS ====================
 
-# ---------- Hands helpers ----------
-# indices (MediaPipe Hands)
-WRIST_I = 0
-TH_TIP, IN_TIP, MI_TIP, RI_TIP, PI_TIP = 4, 8, 12, 16, 20
-IN_MCP, MI_MCP, RI_MCP, PI_MCP = 5, 9, 13, 17
-IN_PIP, MI_PIP, RI_PIP, PI_PIP = 6, 10, 14, 18
-FINGER_SETS = [(IN_MCP, IN_PIP, IN_TIP),(MI_MCP, MI_PIP, MI_TIP),(RI_MCP, RI_PIP, RI_TIP),(PI_MCP, PI_PIP, PI_TIP)]
+def calculate_angle(a, b, c):
+    """Calculate angle between 3 points (in degrees)"""
+    a = np.array(a)
+    b = np.array(b)
+    c = np.array(c)
+    
+    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
+    angle = np.abs(radians * 180.0 / np.pi)
+    
+    if angle > 180.0:
+        angle = 360 - angle
+    
+    return angle
 
-def pick_hand_for_side(hands_res, side: str) -> Optional[int]:
-    if not hands_res or not hands_res.multi_hand_landmarks or not hands_res.multi_handedness: return None
-    target = side.lower()
-    for i, hd in enumerate(hands_res.multi_handedness):
-        if hd.classification[0].label.lower() == target: return i
-    return None
+def calculate_distance(p1, p2):
+    """Calculate distance between 2 points"""
+    return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
-def hand_world_array(world_lms) -> np.ndarray:
-    """Nx3 array of 3D world landmarks (meters)."""
-    return np.array([[lm.x, lm.y, lm.z] for lm in world_lms.landmark], dtype=np.float32)
+def map_range(value, in_min, in_max, out_min, out_max):
+    """Map value from one range to another with clamping"""
+    value = np.clip(value, in_min, in_max)
+    return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
 
-def count_extended_fingers_3d(hand_world_pts: np.ndarray, pip_angle_open_deg: float = 160.0) -> int:
-    ext = 0
-    for (mcp_i, pip_i, tip_i) in FINGER_SETS:
-        a, b, c = hand_world_pts[mcp_i], hand_world_pts[pip_i], hand_world_pts[tip_i]
-        if angle_at_3d(a, b, c) >= pip_angle_open_deg:
-            ext += 1
-    return ext
+def apply_safety_limits(value, motor_name):
+    """Apply safety limits to motor position"""
+    limits = SAFE_LIMITS[motor_name]
+    return np.clip(value, limits["min"], limits["max"])
 
-def palm_center_3d(hand_world_pts: np.ndarray) -> np.ndarray:
-    # average of wrist + 4 MCPs is a decent palm proxy
-    idxs = [WRIST_I, IN_MCP, MI_MCP, RI_MCP, PI_MCP]
-    return np.mean(hand_world_pts[idxs], axis=0)
+def apply_deadzone(current, target, deadzone):
+    """Apply dead zone to prevent jitter"""
+    if abs(target - current) < deadzone:
+        return current
+    return target
 
-def hand_size_scale(hand_world_pts: np.ndarray) -> float:
-    # scale ~ average MCP distance from palm center (size-invariant normalization)
-    c = palm_center_3d(hand_world_pts)
-    idxs = [IN_MCP, MI_MCP, RI_MCP, PI_MCP]
-    return float(np.mean([np.linalg.norm(hand_world_pts[i]-c) for i in idxs]) + 1e-6)
+def smooth_value(current, target, factor):
+    """Smooth transition between values"""
+    return current * factor + target * (1 - factor)
 
-def avg_tip_palm_ratio(hand_world_pts: np.ndarray) -> float:
-    c = palm_center_3d(hand_world_pts)
-    tips = [IN_TIP, MI_TIP, RI_TIP, PI_TIP]
-    d = np.mean([np.linalg.norm(hand_world_pts[i]-c) for i in tips])
-    return float(d / hand_size_scale(hand_world_pts))
+# ==================== CALIBRATION LOADER ====================
 
-# ---------- Preview ----------
-def _norm_for_bar(key: str, value: float) -> float:
-    lim = DEFAULT_LIMITS[key]
-    return 0.5 if lim.hi == lim.lo else clamp((value - lim.lo) / (lim.hi - lim.lo), 0.0, 1.0)
+class CalibrationData:
+    def __init__(self, data):
+        self.id = data["id"]
+        self.drive_mode = data.get("drive_mode", 0)
+        self.homing_offset = data.get("homing_offset", 0)
+        self.range_min = data["range_min"]
+        self.range_max = data["range_max"]
 
-def draw_preview(adj: Dict[str, float], active_keys: List[str], side: str,
-                 hand_method: str, hand_state: Optional[str],
-                 fingers_extended: Optional[int], avg_ratio: Optional[float],
-                 open_min_fingers: int, fist_ratio_thresh: float, open_ratio_thresh: float):
-    H, W = 400, 760
-    img = np.full((H, W, 3), 22, dtype=np.uint8)
-    method_txt = f"{hand_method}" + (f" ({hand_state})" if hand_state else "")
-    title = f"S0101 Preview  |  Side: {side.capitalize()}  |  Hand: {method_txt}"
-    cv2.putText(img, title, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (230,230,230), 2, cv2.LINE_AA)
+class SimpleCalibration:
+    def __init__(self, motors_data):
+        self.data = {name: CalibrationData(data) for name, data in motors_data.items()}
+    
+    def __getitem__(self, key):
+        return self.data.get(key)
 
-    if fingers_extended is not None and avg_ratio is not None:
-        info = f"Fingers: {fingers_extended}  avg_tip_palm_ratio: {avg_ratio:.2f}  (OPEN if >= {open_min_fingers} or ratio>={open_ratio_thresh:.2f}; CLOSE if <=1 and ratio<={fist_ratio_thresh:.2f})"
-        cv2.putText(img, info, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200,200,200), 1, cv2.LINE_AA)
+def load_calibration():
+    """Load calibration from file or use defaults"""
+    calib_file = Path.home() / ".cache/huggingface/lerobot/calibration/robots/so101_follower" / f"{ROBOT_ID}.json"
+    
+    if calib_file.exists():
+        with open(calib_file) as f:
+            return json.load(f)
+    else:
+        print("⚠️  Using default calibration values")
+        return {name: {"id": config["id"], "range_min": config["min"], "range_max": config["max"]}
+                for name, config in MOTOR_CONFIG.items()}
 
-    y = 76
-    line_h = 42
-    name_x, bar_x, bar_w, bar_h = 14, 300, 360, 16
+# ==================== SAFE ROBOT CONTROLLER ====================
 
-    for motor_id, name, key in MOTOR_MAP:
-        if key in active_keys: cv2.rectangle(img, (8, y-22), (W-8, y+16), (60,90,200), -1)
-        cv2.putText(img, f"M{motor_id}  {name}", (name_x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255,255,255), 1, cv2.LINE_AA)
-        v = adj.get(key, 0.0)
-        if key != "gripper":
-            cv2.putText(img, f"{v:+6.1f}°", (bar_x-120, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (220,220,220), 1, cv2.LINE_AA)
-            p = _norm_for_bar(key, v)
-            x0, y0 = bar_x, y - bar_h + 4
-            cv2.rectangle(img, (x0, y0), (x0+bar_w, y0+bar_h), (80,80,80), 1)
-            cv2.rectangle(img, (x0, y0), (x0+int(bar_w*p), y0+bar_h), (120,200,120), -1)
-            cv2.line(img, (x0+bar_w//2, y0+bar_h+2), (x0+bar_w//2, y0+bar_h+6), (150,150,150), 1)
-        else:
-            state = "CLOSE" if v >= 50.0 else "OPEN"
-            cv2.putText(img, f"{state} ({v:4.0f}%)", (bar_x-180, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (220,220,220), 1, cv2.LINE_AA)
-            x0, y0 = bar_x, y - bar_h + 4
-            cv2.rectangle(img, (x0, y0), (x0+bar_w, y0+bar_h), (80,80,80), 1)
-            cv2.rectangle(img, (x0, y0), (x0+int(bar_w*clamp(v/100.0,0,1)), y0+bar_h), (200,150,120), -1)
-        y += line_h
-
-    cv2.imshow("S0101 Preview", img)
-
-# ---------- Main ----------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--side", choices=["right","left"], default="right")
-    ap.add_argument("--backend", choices=["print","udp"], default="print")
-    ap.add_argument("--host", default="127.0.0.1"); ap.add_argument("--port", type=int, default=7777)
-    ap.add_argument("--camera", type=int, default=0)
-    ap.add_argument("--alpha", type=float, default=0.3)  # EMA smoothing for angles
-    ap.add_argument("--max_fps", type=float, default=30.0)
-    ap.add_argument("--active_eps_deg", type=float, default=1.5)
-    ap.add_argument("--open_min_fingers", type=int, default=2, help="OPEN if extended >= this")
-    ap.add_argument("--pip_angle_open_deg", type=float, default=160.0, help="Per-finger PIP angle (3D) to count as extended")
-    ap.add_argument("--fist_ratio_thresh", type=float, default=0.28, help="CLOSE if avg_tip_palm_ratio <= this (and extended <= 1)")
-    ap.add_argument("--open_ratio_thresh", type=float, default=0.45, help="OPEN if avg_tip_palm_ratio >= this")
-    args = ap.parse_args()
-
-    backend = UDPBackend(args.host, args.port) if args.backend == "udp" else PrintBackend()
-    filters = {k: EMA(alpha=args.alpha) for k in ["base","shoulder","elbow","wrist_flex","wrist_roll","gripper"]}
-    offsets, sending, last_adj = Offsets(), True, None
-    last_grip_pct = 0.0  # for hysteresis keep-state when ambiguous
-
-    cap = cv2.VideoCapture(args.camera); cap.set(cv2.CAP_PROP_FPS, args.max_fps)
-    mp_drawing, mp_pose, mp_hands = mp.solutions.drawing_utils, mp.solutions.pose, mp.solutions.hands
-
-    last_send_t = 0.0
-    try:
-        with mp_pose.Pose(static_image_mode=False, model_complexity=1,
-                          enable_segmentation=False, min_detection_confidence=0.5,
-                          min_tracking_confidence=0.5) as pose, \
-             mp_hands.Hands(static_image_mode=False, max_num_hands=2, model_complexity=0,
-                             min_detection_confidence=0.5, min_tracking_confidence=0.5) as hands:
-
-            while True:
-                ok, frame = cap.read()
-                if not ok: print("No frame from camera."); break
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                pose_res  = pose.process(rgb)
-                hands_res = hands.process(rgb)
-                hand_idx  = pick_hand_for_side(hands_res, side=args.side)
-                hand_method = "Hands" if hand_idx is not None else "Fallback"
-                hand_state = None
-                fingers_extended, avg_ratio = None, None
-
-                if pose_res.pose_landmarks is not None:
-                    mp_drawing.draw_landmarks(frame, pose_res.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-                if hand_idx is not None:
-                    mp_drawing.draw_landmarks(frame, hands_res.multi_hand_landmarks[hand_idx], mp_hands.HAND_CONNECTIONS)
-
-                hud_lines, adj = [], None
-                arm = extract_arm_angles(pose_res.pose_world_landmarks, side=args.side) if pose_res.pose_world_landmarks else None
-
-                if arm is not None:
-                    # --- Gripper via hands 3D ---
-                    if hand_idx is not None and hands_res.multi_hand_world_landmarks:
-                        hw = hand_world_array(hands_res.multi_hand_world_landmarks[hand_idx])
-                        fingers_extended = count_extended_fingers_3d(hw, pip_angle_open_deg=args.pip_angle_open_deg)
-                        avg_ratio = avg_tip_palm_ratio(hw)
-
-                        # Decision with hysteresis
-                        if fingers_extended >= args.open_min_fingers or avg_ratio >= args.open_ratio_thresh:
-                            grip_pct = 0.0; hand_state = "OPEN"
-                        elif fingers_extended <= 1 and avg_ratio <= args.fist_ratio_thresh:
-                            grip_pct = 100.0; hand_state = "CLOSE"
-                        else:
-                            # ambiguous -> keep previous state
-                            grip_pct = last_grip_pct
-                            hand_state = "OPEN" if grip_pct < 50.0 else "CLOSE"
-                    else:
-                        # Fallback: pinch vs hand width (coarser, from pose)
-                        ids = RIGHT if args.side == "right" else LEFT
-                        if pose_res.pose_world_landmarks:
-                            I, T, P = vec_of(pose_res.pose_world_landmarks, ids["INDEX"]), vec_of(pose_res.pose_world_landmarks, ids["THUMB"]), vec_of(pose_res.pose_world_landmarks, ids["PINKY"])
-                            pinch, hand_width = float(np.linalg.norm(T - I)), float(np.linalg.norm(I - P)) + 1e-6
-                            ratio = pinch / hand_width
-                            grip_pct = 100.0 * clamp(1.0 - ratio, 0.0, 1.0)
-                            hand_state = "OPEN" if grip_pct < 50.0 else "CLOSE"
-                        else:
-                            grip_pct = last_grip_pct
-                            hand_state = "OPEN" if grip_pct < 50.0 else "CLOSE"
-
-                    # Apply offsets/limits + filtering (snap gripper instantly)
-                    raw = {"base":arm["base"], "shoulder":arm["shoulder"], "elbow":arm["elbow"],
-                           "wrist_flex":arm["wrist_flex"], "wrist_roll":arm["wrist_roll"], "gripper":grip_pct}
-                    adj = {}
-                    for k, v in raw.items():
-                        if k != "gripper": v = v - getattr(offsets, k)
-                        lim = DEFAULT_LIMITS[k]
-                        if lim.invert: v = -v
-                        v = clamp(v, lim.lo, lim.hi)
-                        if k == "gripper":
-                            filters[k].x = float(v); adj[k] = float(v)  # no smoothing for gripper
-                            last_grip_pct = float(v)
-                        else:
-                            adj[k] = filters[k].update(v)
-
-                    payload = {
-                        "t": time.time(), "side": args.side,
-                        "units": {"joints": "deg", "gripper": "percent"},
-                        "joints_deg": { "base_pan":float(adj["base"]), "shoulder_lift":float(adj["shoulder"]),
-                                        "elbow_flex":float(adj["elbow"]), "wrist_flex":float(adj["wrist_flex"]),
-                                        "wrist_roll":float(adj["wrist_roll"]) },
-                        "gripper_pct": float(adj["gripper"]),
-                        "meta": {"hand_method": hand_method, "fingers_extended": fingers_extended, "avg_tip_palm_ratio": avg_ratio}
-                    }
-
-                    now = time.time()
-                    if sending and (now - last_send_t) >= (1.0 / max(args.max_fps, 1.0)):
-                        backend.send(payload); last_send_t = now
-
-                    # HUD
-                    hud_lines.append(f"SEND: {'ON' if sending else 'OFF'}")
-                    hud_lines.append(f"Base  (pan): {adj['base']:6.1f}°")
-                    hud_lines.append(f"Should(lift): {adj['shoulder']:6.1f}°")
-                    hud_lines.append(f"Elbow (flex): {adj['elbow']:6.1f}°")
-                    hud_lines.append(f"Wrist (flex): {adj['wrist_flex']:6.1f}°")
-                    hud_lines.append(f"Wrist (roll): {adj['wrist_roll']:6.1f}°")
-                    state = "CLOSE" if adj['gripper'] >= 50.0 else "OPEN"
-                    extra = f"  method={hand_method}"
-                    if fingers_extended is not None: extra += f"  fingers={fingers_extended}"
-                    if avg_ratio is not None:       extra += f"  ratio={avg_ratio:.2f}"
-                    hud_lines.append(f"Gripper   (%): {adj['gripper']:6.1f}  [{state}]{extra}")
+class SafeRobotController:
+    def __init__(self):
+        calib_data = load_calibration()
+        calibration = SimpleCalibration(calib_data)
+        
+        motors = {
+            name: Motor(config["id"], config["model"], MotorNormMode.RANGE_M100_100)
+            for name, config in MOTOR_CONFIG.items()
+        }
+        
+        self.bus = FeetechMotorsBus(port=PORT, motors=motors, calibration=calibration)
+        self.bus.connect()
+        
+        # Smoothed positions
+        self.positions = {name: 0.0 for name in MOTOR_CONFIG.keys()}
+        self.paused = False
+        
+        # Error tracking
+        self.error_count = {name: 0 for name in MOTOR_CONFIG.keys()}
+        self.voltage_errors = 0
+        
+        # Rate limiting
+        self.last_update_time = time.time()
+        
+        print("✓ Robot connected!")
+        print("\n⚠️  SAFETY LIMITS ACTIVE:")
+        for name, limits in SAFE_LIMITS.items():
+            print(f"   {name}: {limits['min']} to {limits['max']}")
+        print()
+    
+    def update(self, target_positions, paused=False, emergency_stop=False):
+        """Update robot positions with safety limits, smoothing and dead zone"""
+        self.paused = paused or emergency_stop
+        
+        if self.paused:
+            return
+        
+        # Rate limiting to prevent voltage issues
+        current_time = time.time()
+        if current_time - self.last_update_time < UPDATE_INTERVAL:
+            return  # Skip this update
+        self.last_update_time = current_time
+        
+        for name, target in target_positions.items():
+            # Apply safety limits FIRST
+            target = apply_safety_limits(target, name)
+            
+            # Apply dead zone
+            target = apply_deadzone(self.positions[name], target, DEAD_ZONE)
+            
+            # Smooth transition (extra safe)
+            self.positions[name] = smooth_value(self.positions[name], target, SMOOTHING)
+            
+            # Send to robot with error handling
+            try:
+                self.bus.write("Goal_Position", name, self.positions[name])
+                self.error_count[name] = 0  # Reset error count on success
+            except RuntimeError as e:
+                self.error_count[name] += 1
+                
+                if "voltage error" in str(e).lower():
+                    self.voltage_errors += 1
+                    if self.voltage_errors % 10 == 1:  # Print every 10 errors
+                        print(f"⚠️  Voltage error on {name}. Check power supply!")
+                        print(f"   Total voltage errors: {self.voltage_errors}")
+                    
+                    # Skip this motor for now to reduce load
+                    if self.voltage_errors > 50:
+                        print(f"❌ Too many voltage errors ({self.voltage_errors}). Stopping.")
+                        raise
                 else:
-                    hud_lines.append("Pose not detected")
+                    # Other error - print and continue
+                    if self.error_count[name] == 1:
+                        print(f"⚠️  Error on {name}: {e}")
+                
+                # If motor keeps failing, skip it
+                if self.error_count[name] > 5:
+                    print(f"⚠️  Motor {name} disabled due to repeated errors")
+                    continue
+    
+    def go_to_neutral(self):
+        """Slowly move to neutral position (all motors at 0)"""
+        print("🏠 Moving to neutral position...")
+        target = {name: 0.0 for name in MOTOR_CONFIG.keys()}
+        
+        # Slow movement to neutral
+        for _ in range(50):
+            self.update(target, paused=False, emergency_stop=False)
+            time.sleep(0.05)
+        
+        print("✓ Neutral position reached")
+    
+    def disconnect(self):
+        self.bus.disconnect()
+        print("✓ Robot disconnected")
 
-                # HUD on camera
-                y = 20
-                for line in hud_lines:
-                    cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,0), 1, cv2.LINE_AA); y += 20
-                cv2.putText(frame, "Keys: [c]=zero angles  [z]=reset  [space]=send  [q]=quit",
-                            (10, frame.shape[0]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255,255,255), 1, cv2.LINE_AA)
-                cv2.imshow("Leader Arm (MediaPipe)", frame)
+# ==================== TELEOPERATION SYSTEM ====================
 
-                # --- Preview ---
-                if adj is None and last_adj is not None: adj_for_preview = last_adj
-                elif adj is not None: adj_for_preview = adj
-                else: adj_for_preview = {k:0.0 for k in ["base","shoulder","elbow","wrist_flex","wrist_roll","gripper"]}
-
-                active_keys = []
-                if last_adj is not None and adj_for_preview is not None:
-                    for k in ["base","shoulder","elbow","wrist_flex","wrist_roll"]:
-                        if abs(adj_for_preview[k] - last_adj[k]) >= args.active_eps_deg: active_keys.append(k)
-                    if abs(adj_for_preview["gripper"] - last_adj["gripper"]) >= 5.0: active_keys.append("gripper")
-
-                draw_preview(adj_for_preview, active_keys, side=args.side,
-                             hand_method=hand_method, hand_state=("OPEN" if adj_for_preview["gripper"]<50 else "CLOSE"),
-                             fingers_extended=fingers_extended, avg_ratio=avg_ratio,
-                             open_min_fingers=args.open_min_fingers,
-                             fist_ratio_thresh=args.fist_ratio_thresh, open_ratio_thresh=args.open_ratio_thresh)
-                last_adj = adj_for_preview
-
-                # Keys
+class TeleoperationSystem:
+    def __init__(self):
+        # MediaPipe setup
+        self.mp_pose = mp.solutions.pose
+        self.mp_hands = mp.solutions.hands
+        self.mp_draw = mp.solutions.drawing_utils
+        
+        self.pose = self.mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+        self.hands = self.mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+        
+        # Robot controller
+        self.robot = SafeRobotController()
+        
+        # Video capture
+        self.cap = cv2.VideoCapture(CAMERA_ID)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        
+        # Emergency stop flag
+        self.emergency_stop = False
+        
+        print("✓ Teleoperation system ready!")
+        print("\n📋 CONTROLS:")
+        print("  • Right arm horizontal = Robot neutral")
+        print("  • Open hand = Gripper open")
+        print("  • Closed hand = Gripper closed")
+        print("  • Drop arm down = PAUSE mode")
+        print("  • SPACE = EMERGENCY STOP")
+        print("  • 'n' = Go to neutral position")
+        print("  • 'q' = Quit\n")
+        print("⚠️  Start with SMALL movements to test limits!\n")
+    
+    def process_frame(self):
+        """Process one frame and return motor positions"""
+        ret, frame = self.cap.read()
+        if not ret:
+            return None, None, None
+        
+        # Flip for mirror view
+        frame = cv2.flip(frame, 1)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Process pose and hands
+        pose_results = self.pose.process(rgb_frame)
+        hand_results = self.hands.process(rgb_frame)
+        
+        # Initialize target positions
+        targets = {name: 0.0 for name in MOTOR_CONFIG.keys()}
+        paused = False
+        
+        h, w, _ = frame.shape
+        
+        # ============ POSE DETECTION ============
+        if pose_results.pose_landmarks:
+            landmarks = pose_results.pose_landmarks.landmark
+            
+            # Get key points (right arm)
+            shoulder = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
+            elbow = landmarks[self.mp_pose.PoseLandmark.RIGHT_ELBOW.value]
+            wrist = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST.value]
+            hip = landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP.value]
+            
+            # Convert to pixel coordinates
+            shoulder_pt = [shoulder.x * w, shoulder.y * h]
+            elbow_pt = [elbow.x * w, elbow.y * h]
+            wrist_pt = [wrist.x * w, wrist.y * h]
+            hip_pt = [hip.x * w, hip.y * h]
+            
+            # Calculate angles
+            shoulder_angle = calculate_angle(hip_pt, shoulder_pt, elbow_pt)
+            elbow_angle = calculate_angle(shoulder_pt, elbow_pt, wrist_pt)
+            
+            # Check pause condition (arm dropped)
+            if shoulder_angle < PAUSE_THRESHOLD:
+                paused = True
+                cv2.putText(frame, "[ PAUSED ]", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 165, 255), 3)
+            else:
+                # Map angles to robot motors with REDUCED ranges
+                # Shoulder Pan (horizontal rotation): use shoulder x-position
+                targets["shoulder_pan"] = map_range(shoulder.x, 0.35, 0.65, 
+                                                   SAFE_LIMITS["shoulder_pan"]["min"], 
+                                                   SAFE_LIMITS["shoulder_pan"]["max"])
+                
+                # Shoulder Lift: arm elevation
+                targets["shoulder_lift"] = map_range(shoulder_angle, 40, 140, 
+                                                    SAFE_LIMITS["shoulder_lift"]["min"], 
+                                                    SAFE_LIMITS["shoulder_lift"]["max"])
+                
+                # Elbow Flex
+                targets["elbow_flex"] = map_range(elbow_angle, 60, 160, 
+                                                 SAFE_LIMITS["elbow_flex"]["min"], 
+                                                 SAFE_LIMITS["elbow_flex"]["max"])
+            
+            # Draw pose
+            self.mp_draw.draw_landmarks(frame, pose_results.pose_landmarks, self.mp_pose.POSE_CONNECTIONS)
+        
+        # ============ HAND DETECTION ============
+        if hand_results.multi_hand_landmarks and not paused:
+            for hand_landmarks in hand_results.multi_hand_landmarks:
+                # Get key points
+                wrist = hand_landmarks.landmark[0]
+                thumb_tip = hand_landmarks.landmark[4]
+                index_tip = hand_landmarks.landmark[8]
+                middle_tip = hand_landmarks.landmark[12]
+                
+                # Wrist Flex: hand pitch (y-position relative to elbow)
+                if pose_results.pose_landmarks:
+                    elbow = pose_results.pose_landmarks.landmark[self.mp_pose.PoseLandmark.RIGHT_ELBOW.value]
+                    wrist_angle = (wrist.y - elbow.y) * 150  # Reduced scale
+                    targets["wrist_flex"] = apply_safety_limits(wrist_angle, "wrist_flex")
+                
+                # Wrist Roll: hand rotation (x-position of fingers)
+                roll_angle = (middle_tip.x - wrist.x) * 150  # Reduced scale
+                targets["wrist_roll"] = apply_safety_limits(roll_angle, "wrist_roll")
+                
+                # Gripper: distance between thumb and index
+                thumb_pt = [thumb_tip.x * w, thumb_tip.y * h]
+                index_pt = [index_tip.x * w, index_tip.y * h]
+                distance = calculate_distance(thumb_pt, index_pt)
+                
+                # Map distance to gripper position (close = small distance)
+                targets["gripper"] = map_range(distance, 20, 100, 
+                                              SAFE_LIMITS["gripper"]["min"], 
+                                              SAFE_LIMITS["gripper"]["max"])
+                
+                # Draw hand
+                self.mp_draw.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+        
+        return frame, targets, paused
+    
+    def draw_ui(self, frame, targets, paused):
+        """Draw UI overlay with motor positions and safety status"""
+        h, w, _ = frame.shape
+        
+        # Semi-transparent panel
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (w - 380, 0), (w, 470), (0, 0, 0), -1)
+        frame = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
+        
+        # Title
+        cv2.putText(frame, "SAFE TELEOPERATION", (w - 370, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Emergency stop indicator
+        if self.emergency_stop:
+            cv2.putText(frame, "!!! EMERGENCY STOP !!!", (50, 50), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+        
+        # Voltage error indicator
+        if self.robot.voltage_errors > 0:
+            error_color = (0, 100, 255) if self.robot.voltage_errors < 20 else (0, 0, 255)
+            cv2.putText(frame, f"Voltage Errors: {self.robot.voltage_errors}", 
+                       (w - 370, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, error_color, 2)
+        
+        # Motor positions
+        y_offset = 80
+        for i, (name, value) in enumerate(targets.items()):
+            actual_value = self.robot.positions[name]
+            limits = SAFE_LIMITS[name]
+            
+            # Color coding
+            if self.emergency_stop or paused:
+                color = (100, 100, 100)
+            elif abs(actual_value - limits["max"]) < 5 or abs(actual_value - limits["min"]) < 5:
+                color = (0, 165, 255)  # Orange when near limits
+            else:
+                color = (0, 255, 0)  # Green when safe
+            
+            # Motor name
+            cv2.putText(frame, name.upper(), (w - 370, y_offset), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+            
+            # Limit indicators
+            cv2.putText(frame, f"[{limits['min']}, {limits['max']}]", 
+                       (w - 370, y_offset + 15), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1)
+            
+            # Position bar
+            bar_x = w - 370
+            bar_y = y_offset + 25
+            bar_w = 330
+            bar_h = 12
+            
+            # Background bar
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (50, 50, 50), -1)
+            
+            # Safe range indicators (vertical lines)
+            safe_min_x = int(bar_x + (limits["min"] + 100) * bar_w / 200)
+            safe_max_x = int(bar_x + (limits["max"] + 100) * bar_w / 200)
+            cv2.line(frame, (safe_min_x, bar_y), (safe_min_x, bar_y + bar_h), (255, 100, 0), 2)
+            cv2.line(frame, (safe_max_x, bar_y), (safe_max_x, bar_y + bar_h), (255, 100, 0), 2)
+            
+            # Position indicator
+            pos_x = int(bar_x + (actual_value + 100) * bar_w / 200)
+            cv2.circle(frame, (pos_x, bar_y + bar_h // 2), 6, color, -1)
+            
+            # Value text
+            cv2.putText(frame, f"{actual_value:.1f}", (w - 70, y_offset + 15), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+            
+            y_offset += 55
+        
+        return frame
+    
+    def run(self):
+        """Main teleoperation loop"""
+        try:
+            while True:
+                frame, targets, paused = self.process_frame()
+                
+                if frame is None:
+                    break
+                
+                # Update robot
+                if targets:
+                    self.robot.update(targets, paused, self.emergency_stop)
+                
+                # Draw UI
+                frame = self.draw_ui(frame, targets or {}, paused)
+                
+                # Show frame
+                cv2.imshow("Safe MediaPipe Robot Teleoperation", frame)
+                
+                # Handle keyboard
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'): break
-                elif key == ord(' '): sending = not sending
-                elif key == ord('z'):
-                    offsets = Offsets()
-                    for f in filters.values(): f.x = None
-                    print("[reset] offsets cleared.")
-                elif key == ord('c') and pose_res.pose_world_landmarks:
-                    ang = extract_arm_angles(pose_res.pose_world_landmarks, side=args.side)
-                    if ang:
-                        offsets = Offsets(base=ang["base"], shoulder=ang["shoulder"], elbow=ang["elbow"],
-                                          wrist_flex=ang["wrist_flex"], wrist_roll=ang["wrist_roll"], gripper=0.0)
-                        for f in filters.values(): f.x = None
-                        print("[calibrate] current pose captured as zero-offset for angles.")
-    finally:
-        backend.close(); cap.release(); cv2.destroyAllWindows()
+                
+                if key == ord('q'):
+                    break
+                elif key == ord(' '):  # SPACE = emergency stop
+                    self.emergency_stop = not self.emergency_stop
+                    if self.emergency_stop:
+                        print("🛑 EMERGENCY STOP ACTIVATED")
+                    else:
+                        print("✓ Emergency stop released")
+                elif key == ord('n'):  # N = neutral position
+                    self.robot.go_to_neutral()
+        
+        except KeyboardInterrupt:
+            print("\n⚠️  Interrupted")
+        finally:
+            self.cleanup()
+    
+    def cleanup(self):
+        """Clean up resources"""
+        print("\n🏠 Returning to neutral position before shutdown...")
+        self.robot.go_to_neutral()
+        
+        self.cap.release()
+        cv2.destroyAllWindows()
+        self.robot.disconnect()
+        print("✓ Cleanup complete")
 
-if __name__ == "__main__": main()
+# ==================== MAIN ====================
+
+if __name__ == "__main__":
+    print("🤖 Starting SAFE MediaPipe Teleoperation System...\n")
+    print("⚠️  IMPORTANT SAFETY NOTES:")
+    print("   1. Start with SMALL movements")
+    print("   2. Test each motor individually")
+    print("   3. Keep EMERGENCY STOP (SPACE) ready")
+    print("   4. Increase limits in SAFE_LIMITS if needed")
+    print("   5. CHECK POWER SUPPLY VOLTAGE (voltage errors can occur)")
+    print(f"   6. Update rate: {UPDATE_RATE} Hz (reduce if voltage issues)\n")
+    
+    try:
+        system = TeleoperationSystem()
+        system.run()
+    except RuntimeError as e:
+        if "voltage error" in str(e).lower():
+            print("\n" + "="*60)
+            print("❌ STOPPED DUE TO VOLTAGE ERRORS")
+            print("="*60)
+            print("\n💡 SOLUTIONS:")
+            print("   1. Check power supply/battery voltage")
+            print("   2. Reduce UPDATE_RATE (currently {})".format(UPDATE_RATE))
+            print("   3. Increase SMOOTHING (currently {})".format(SMOOTHING))
+            print("   4. Use fewer motors simultaneously")
+            print("   5. Check for mechanical obstructions")
+            print("\n⚡ Power supply should be 12V with sufficient current")
+        else:
+            raise
