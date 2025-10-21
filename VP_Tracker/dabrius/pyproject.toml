@@ -6,14 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "dabrius"
 version = "0.1.0"
 description = "Vision Pro tracking client + LeRobot teleoperation utilities"
-readme = ""
-authors = [{name="Darius Giannoli and Gabriel Taieb", ", email="darius.giannoli@epfl.ch, gabriel.taieb@epfl.ch"}]
-license = {text = "MIT"}
+# readme = "README.md"  # uncomment only if this file exists, otherwise omit this line
+authors = [
+  { name = "Darius Giannoli", email = "darius.giannoli@epfl.ch" },
+  { name = "Gabriel Taieb",  email = "gabriel.taieb@epfl.ch" }
+]
+license = { text = "MIT" }
 requires-python = ">=3.9"
 dependencies = [
   "numpy>=1.23",
   "websockets>=12.0",
-  "lerobot",
+  "lerobot"
 ]
 
 [project.scripts]

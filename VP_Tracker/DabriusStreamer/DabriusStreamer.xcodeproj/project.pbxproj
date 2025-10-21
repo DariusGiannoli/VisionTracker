@@ -240,6 +240,9 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "$(TARGET_NAME)/Info.plist";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Track hands and body for teleoperation.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Stream tracking data to my computer on the local network.";
+				INFOPLIST_KEY_NSMotionUsageDescription = "Use motion data to improve pose tracking stability.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -269,6 +272,9 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "$(TARGET_NAME)/Info.plist";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Track hands and body for teleoperation.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Stream tracking data to my computer on the local network.";
+				INFOPLIST_KEY_NSMotionUsageDescription = "Use motion data to improve pose tracking stability.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

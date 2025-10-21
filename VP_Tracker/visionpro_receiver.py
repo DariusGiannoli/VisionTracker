@@ -21,7 +21,7 @@ from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
 # ----------------- USER CONFIG -----------------
-AVP_IP  = "128.179.128.243"                 # Vision Pro IP (shown in the app)
+AVP_IP  = "192.168.68.141"                # Vision Pro IP (shown in the app)            # Vision Pro IP (shown in the app)
 PORT    = "/dev/tty.usbmodem58FD0170541"    # Follower USB port
 ROBOT_ID = "dabrius"
 

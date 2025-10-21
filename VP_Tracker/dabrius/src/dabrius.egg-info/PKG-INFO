@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: dabrius
+Version: 0.1.0
+Summary: Vision Pro tracking client + LeRobot teleoperation utilities
+Author-email: Darius Giannoli <darius.giannoli@epfl.ch>, Gabriel Taieb <gabriel.taieb@epfl.ch>
+License: MIT
+Requires-Python: >=3.9
+Requires-Dist: numpy>=1.23
+Requires-Dist: websockets>=12.0
+Requires-Dist: lerobot
