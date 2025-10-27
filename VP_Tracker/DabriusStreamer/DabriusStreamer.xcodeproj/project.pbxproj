@@ -240,9 +240,13 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "$(TARGET_NAME)/Info.plist";
+				INFOPLIST_KEY_NSAccessoryTrackingUsageDescription = "Track accessories for improved pose awareness (if available).";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Track hands and body for teleoperation.";
+				INFOPLIST_KEY_NSHandsTrackingUsageDescription = "A message that tells people why the app is requesting access to track their hand position and location.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Stream tracking data to my computer on the local network.";
+				INFOPLIST_KEY_NSMainCameraUsageDescription = "A message that tells people why the app is requesting access to the device’s main camera.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Use motion data to improve pose tracking stability.";
+				INFOPLIST_KEY_NSWorldSensingUsageDescription = "Use world sensing (camera/depth) to compute head-relative pose for teleoperation.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -272,9 +276,13 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "$(TARGET_NAME)/Info.plist";
+				INFOPLIST_KEY_NSAccessoryTrackingUsageDescription = "Track accessories for improved pose awareness (if available).";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Track hands and body for teleoperation.";
+				INFOPLIST_KEY_NSHandsTrackingUsageDescription = "A message that tells people why the app is requesting access to track their hand position and location.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Stream tracking data to my computer on the local network.";
+				INFOPLIST_KEY_NSMainCameraUsageDescription = "A message that tells people why the app is requesting access to the device’s main camera.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Use motion data to improve pose tracking stability.";
+				INFOPLIST_KEY_NSWorldSensingUsageDescription = "Use world sensing (camera/depth) to compute head-relative pose for teleoperation.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
