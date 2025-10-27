@@ -4,9 +4,11 @@
 //
 //  Behavior:
 //  - Start => launches WS server + AR tracking, hides UI (blank window).
-//  - Double-tap (double-pinch) anywhere to reopen controls.
-//  - Long-press (~0.5s) fallback to reopen.
-//  - Invisible hot-corner (top-left) fallback to reopen.
+//  - Reopen controls while hidden with ANY of these gestures on the window:
+//      • Double-tap (double-pinch)
+//      • Long-press (~0.5 s)
+//      • Tiny drag (move finger/pinch slightly)
+//      • Invisible hot-corner (top-left)
 //  - Streams head-relative wrist pose, wrist roll, pinch + "active" motor flags.
 //
 
@@ -72,12 +74,12 @@ final class AppState: ObservableObject {
         ipAddress = currentIPv4Address() ?? "Unknown"
         do {
             try server.start(port: port, path: "/stream")
-            // refresh once more in case interface changed after start
+            // Refresh once more in case interface changed after start
             ipAddress = currentIPv4Address() ?? ipAddress
 
             tracker.startVR()              // ARKitSession providers (prompts on first run)
-            running = true
-            status  = "Streaming on ws://\(ipAddress):\(port)/stream"
+            running  = true
+            status   = "Streaming on ws://\(ipAddress):\(port)/stream"
             uiHidden = true
 
             timer = Timer.scheduledTimer(withTimeInterval: 1.0 / Double(fps),
@@ -138,9 +140,9 @@ struct ContentView: View {
         ZStack {
             // ---------- NO-UI STREAMING MODE ----------
             if app.running && app.uiHidden {
-                ZStack {
-                    // Full transparent, clickable surface
-                    Color.clear
+                GeometryReader { geo in
+                    // We draw a *very* faint layer so the view actually receives hits.
+                    Color.white.opacity(0.001)
                         .ignoresSafeArea()
                         .contentShape(Rectangle())
                         // High-priority double-tap (double-pinch)
@@ -155,19 +157,27 @@ struct ContentView: View {
                                 app.uiHidden = false
                             }
                         )
-
-                    // Invisible hot-corner (top-left) fallback
-                    VStack {
-                        HStack {
-                            Button(action: { app.uiHidden = false }) {
-                                Color.clear.frame(width: 64, height: 64)
+                        // Tiny drag fallback (move a bit)
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 1).onEnded { _ in
+                                app.uiHidden = false
                             }
-                            .contentShape(Rectangle())
-                            .opacity(0.01) // clickable but invisible
-                            Spacer()
-                        }
-                        Spacer()
-                    }
+                        )
+                        .overlay(
+                            // Invisible hot-corner (top-left) fallback
+                            VStack {
+                                HStack {
+                                    Button(action: { app.uiHidden = false }) {
+                                        Color.clear.frame(width: 64, height: 64)
+                                    }
+                                    .contentShape(Rectangle())
+                                    .opacity(0.01) // clickable but invisible
+                                    Spacer()
+                                }
+                                Spacer()
+                            }
+                        )
+                        .accessibilityLabel("Hidden streaming surface — double-tap to reopen controls")
                 }
             }
             // ---------- CONTROL UI ----------
