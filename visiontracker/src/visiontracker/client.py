@@ -14,10 +14,10 @@ def _mat44(x: Any) -> np.ndarray:
 
 class VisionStreamClient:
     """
-    Minimal WebSocket JSON client for Dabrius Streamer.
+    Minimal WebSocket JSON client for VisionTracker Streamer.
     Messages (20–60 Hz):
     {
-      "schema": "dabrius/v1",
+      "schema": "visiontracker/v1",
       "t": 123456.7,
       "head_rel": {
         "right_wrist_44": [[...],[...],[...],[...]],
@@ -56,7 +56,7 @@ class VisionStreamClient:
                 right_wrist=rw44,
                 right_wrist_roll_deg=float(hr.get("right_wrist_roll_deg", 0.0)),
                 right_pinch_m=float(hr["right_pinch_m"]) if hr.get("right_pinch_m") is not None else None,
-                extra={"schema": data.get("schema", "dabrius/v1")}
+                extra={"schema": data.get("schema", "visiontracker/v1")}
             )
             fr.validate()
             yield fr

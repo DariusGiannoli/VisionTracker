@@ -1,6 +1,6 @@
 //
 //  Tracker.swift
-//  DabriusStreamer (visionOS)
+// VisionTrackerStreamer (visionOS)
 //
 
 import Foundation

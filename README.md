@@ -1,6 +1,6 @@
-# DabriusStreamer
+# VisionTrackerStreamer
 
-DabriusStreamer is a teleoperation system for the LeRobot SO-101 arm using the Apple Vision Pro. It turns the headset into a WebSocket server that streams Head-Relative hand tracking data to control the robot in real-time.
+VisionTrackerStreamer is a teleoperation system for the LeRobot SO-101 arm using the Apple Vision Pro. It turns the headset into a WebSocket server that streams Head-Relative hand tracking data to control the robot in real-time.
 
 **Authors:** Darius Giannoli & Gabriel Taieb
 
@@ -33,7 +33,7 @@ The Python script connects to the headset to drive the motors.
 2. Connect the robot via USB.
 3. Run the CLI:
 ```bash
-python -m dabrius.cli \
+python -m visiontracker.cli \
   --ws-host <VISION_PRO_IP> \
   --ws-port 8211 \
   --serial-port /dev/tty.usbmodem<YOUR_PORT>

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Teleop loop for LeRobot SO-101 using the Dabrius Vision Pro stream.
+Teleop loop for LeRobot SO-101 using the VisionTracker Vision Pro stream.
 
 Adds proper Feetech calibration loading so normalized commands (-100..100)
 map to real servo positions. Falls back to conservative ranges if the JSON
@@ -100,7 +100,7 @@ async def _run(
     update_hz: float = 20.0,
     smoothing: float = 0.8,
     deadzone_deg: float = 2.0,
-    robot_id: str = "dabrius",     # <— default robot ID for calibration file
+    robot_id: str = "visiontracker",     # <— default robot ID for calibration file
 ):
     # Connect to Vision Pro stream
     client = VisionStreamClient(ws_host, ws_port, ws_path)
@@ -203,7 +203,7 @@ def run_teleop(
     serial_port: str,
     ws_port: int = 8211,
     ws_path: str = "/stream",
-    robot_id: str = "dabrius",   # keep default for CLI compatibility
+    robot_id: str = "visiontracker",   # keep default for CLI compatibility
 ):
     asyncio.run(
         _run(

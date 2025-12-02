@@ -2,7 +2,7 @@ import argparse
 from .teleop import run_teleop
 
 def main():
-    p = argparse.ArgumentParser("dabrius-teleop")
+    p = argparse.ArgumentParser("visiontracker-teleop")
     p.add_argument("--ws-host", required=True, help="Vision Pro IP or hostname")
     p.add_argument("--ws-port", type=int, default=8211)
     p.add_argument("--ws-path", default="/stream")

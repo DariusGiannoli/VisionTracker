@@ -1,2 +1,0 @@
-[console_scripts]
-dabrius-teleop = dabrius.cli:main

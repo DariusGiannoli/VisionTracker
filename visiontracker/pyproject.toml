@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dabrius"
+name = "visiontracker"
 version = "0.1.0"
 description = "Vision Pro tracking client + LeRobot teleoperation utilities"
 # readme = "README.md"  # uncomment only if this file exists, otherwise omit this line
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-dabrius-teleop = "dabrius.cli:main"
+visiontracker-teleop = "visiontracker.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

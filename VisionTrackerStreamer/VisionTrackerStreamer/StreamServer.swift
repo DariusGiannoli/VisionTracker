@@ -1,6 +1,6 @@
 //
 //  StreamServer.swift
-//  DabriusStreamer
+//  VisionTrackerStreamer
 //
 //  Created by Gabriel TAIEB on 14/10/2025.
 //
@@ -12,7 +12,7 @@ import Network
 final class StreamServer {
     private var listener: NWListener?
     private var connections: [NWConnection] = []
-    private let queue = DispatchQueue(label: "dabrius.ws.server")
+    private let queue = DispatchQueue(label: "visiontracker.ws.server")
 
     func start(port: UInt16, path: String) throws {
         let params = NWParameters(tls: nil)

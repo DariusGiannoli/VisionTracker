@@ -1,6 +1,6 @@
 //
 //  Pose.swift
-//  DabriusStreamer
+//  VisionTrackerStreamer
 //
 //  Created by Gabriel TAIEB on 14/10/2025.
 //
