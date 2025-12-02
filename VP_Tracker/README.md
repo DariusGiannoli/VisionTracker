@@ -1,80 +1,90 @@
-# Dabrius
+# DabriusStreamer
 
-Stream head-relative wrist pose, wrist roll, and pinch from Apple Vision Pro to control a LeRobot SO-101 arm with safety mapping.
+DabriusStreamer is a teleoperation system for the LeRobot SO-101 arm using the Apple Vision Pro. It turns the headset into a WebSocket server that streams Head-Relative hand tracking data to control the robot in real-time.
 
-## Requirements
+**Authors:** Darius Giannoli & Gabriel Taieb
 
-**Vision Pro**
-- DabriusStreamer app (visionOS target in this project)
-
-**Laptop**
-- Same Wi-Fi network as Vision Pro
-- Python environment with dependencies:
-
-```bash
-pip install -e .   # from dabrius/ directory
-```
-
-Dependencies include: `numpy`, `websockets>=12`, `lerobot`
-
-## Setup
-
-### Vision Pro
-
-1. Build and run DabriusStreamer from Xcode (visionOS target)
-2. Grant permissions on first launch:
-   - World Sensing
-   - Hands Tracking
-   - Main Camera
-   - Local Network
-3. The window will hide after starting (no persistent UI)
-4. Reopen controls: double-tap anywhere, long-press (0.5s), or use top-left hot-corner
-5. Note the WebSocket URL displayed before starting: `ws://<IP>:8211/stream`
-
-### Laptop
-
-**Test connection (optional)**
-
-```python
-python - <<'PY'
-import json
-from websockets.sync.client import connect
-IP = "<<HEADSET_IP>>"
-with connect(f"ws://{IP}:8211/stream", open_timeout=5) as ws:
-    print(list(json.loads(ws.recv()).keys()))
-PY
-```
-
-**Start teleoperation**
-
-```bash
-dabrius-teleop --ws-host <<HEADSET_IP>> \
-               --serial-port /dev/tty.usbmodem58FD0170541 \
-               --robot-id dabrius
-```
-
-## Control Mapping
-
-| Body Movement | Robot Joint |
-|---------------|-------------|
-| Hand left/right | `shoulder_pan` |
-| Hand up/down | `shoulder_lift` (asymmetric, favors forward) |
-| Hand forward/back | `elbow_flex` (backward limited) |
-| Wrist pitch | `wrist_flex` (decoupled from vertical + speed gate) |
-| Wrist roll | `wrist_roll` |
-| Pinch (thumb–index) | `gripper` |
-
-Toggle individual motors on/off using the Active Motors control in the headset UI.
-
-## Calibration
-
-Normalized commands (−100 to 100) are mapped using your LeRobot calibration file:
-
-```
-~/.cache/huggingface/lerobot/calibration/robots/so101_follower/<robot_id>.json
-```
-
-Specify `--robot-id` if your calibration file differs from the default `dabrius`. A safe fallback is used if the file is missing
 ---
 
-© Darius Giannoli & Gabriel Taieb
+## 🛠 Hardware Requirements
+
+* Apple Vision Pro (visionOS)
+* LeRobot SO-101 (Feetech STS3215 motors)
+* Mac/PC with Python environment
+
+---
+
+## 🚀 Installation & Setup
+
+### 1. Vision Pro App (Server)
+
+The visionOS app acts as the WebSocket server.
+
+1. Open the project in Xcode and run it on your Vision Pro.
+2. Grant Hand Tracking permissions.
+3. Note the **IP Address** and **Port** (default: `8211`) displayed on the dashboard.
+4. Configure your settings (see below) and press **Start**.
+
+### 2. Python Client (Robot Control)
+
+The Python script connects to the headset to drive the motors.
+
+1. Install dependencies: `lerobot`, `numpy`, `websockets`.
+2. Connect the robot via USB.
+3. Run the CLI:
+```bash
+python -m dabrius.cli \
+  --ws-host <VISION_PRO_IP> \
+  --ws-port 8211 \
+  --serial-port /dev/tty.usbmodem<YOUR_PORT>
+```
+
+---
+
+## 🧠 Core Concept: Head-Relative Tracking
+
+The system uses a **Head-Relative coordinate system**. The robot mimics the position of your **Hand relative to your Face** (Headset).
+
+* **Benefit:** You can walk around the room or sit down; as long as your hand stays in the same position relative to your eyes, the robot remains stable.
+
+---
+
+## 🎮 Controls & Mapping
+
+| Hand Motion (Relative to Face) | Robot Action | Motor ID |
+|--------------------------------|--------------|----------|
+| Left / Right | Shoulder Pan | ID 1 |
+| Up / Down | Shoulder Lift | ID 2 |
+| Forward / Back | Elbow Flex (Reach) | ID 3 |
+| Wrist Pitch | Wrist Flex | ID 4 |
+| Wrist Roll | Wrist Roll | ID 5 |
+| Pinch (Thumb+Index) | Gripper Open/Close | ID 6 |
+
+---
+
+## 📱 App Interface & Features
+
+### Configuration (Pre-Stream)
+
+* **FPS Selection:** Choose 20, 30, or 60 FPS. Higher FPS is smoother but consumes more battery.
+* **Active Motors:** Toggle specific motors ON/OFF (e.g., disable the Gripper or Elbow) before starting the stream.
+
+### Stealth Mode (During Stream)
+
+To maximize immersion, the UI disappears when you press **Start**. To bring the controls back (and Stop the robot):
+
+* **Double-Tap** (Double Pinch) anywhere.
+* **Long-Press** (Pinch and hold ~0.5s).
+* **Drag** (Pinch and move slightly).
+
+---
+
+## ⚙️ Safety
+
+* **Speed Gating:** Prevents sudden jumps if the tracking glitches.
+* **Smoothing:** Applies an alpha smoothing factor (0.8) to movement.
+* **Calibration:** Loads motor calibration from `~/.cache/huggingface/lerobot/...`. If missing, falls back to safe default ranges.
+
+---
+
+**Based on code version:** 0.1.0
